@@ -11,6 +11,8 @@ library(readr)
 library(shinycssloaders)
 library(purrr)
 library(stringr)
+library(knitr)
+
 
 
 # ---- Load & wrangle data (project-relative path) ----
@@ -100,22 +102,38 @@ ui <- fluidPage(
         tabPanel(
           "Parameters",
           br(),
-          h4("Model specifications & parameters (preview)"),
-          withSpinner(uiOutput("model_params_ui")),
+          h4("Model specifications (MVP: ETS form & ARIMA orders)"),
+          p("Select model types to view using the sidebar 'Models to view' dropdown."),
+          checkboxInput("show_model_details", "Show additional details (full report / tidy)", value = FALSE),
+          br(),
+          # renders a compact table with ETS form / ARIMA orders (one row per fitted object)
+          withSpinner(tableOutput("model_spec_table")),
+          br(),
+          # if user checked details, show verbose panels below (report/tidy fallback)
+          conditionalPanel(
+            condition = "input.show_model_details == true",
+            h4("Additional model details"),
+            withSpinner(uiOutput("model_params_ui"))
+          )
         ),
+
         tabPanel(
           "Accuracy",
           br(),
-          # checkbox inside the Accuracy tab to toggle train accuracy
+          # checkbox inside the Accuracy tab to toggle train accuracy visibility
           checkboxInput("show_train_acc", "Show training (in-sample) accuracy", value = FALSE),
-
-          # explanation
-          p("Validation accuracy (forecast vs actual) is always shown when a validation window exists."),
+          p("Validation accuracy (forecast vs actual) shown below when a validation window exists."),
           br(),
-
-          # accuracy table (reactive rendering handled in server)
-          withSpinner(tableOutput("acc_tab"))
+          h4("Validation accuracy"),
+          withSpinner(tableOutput("acc_val_only")),
+          br(),
+          conditionalPanel(
+            condition = "input.show_train_acc == true",
+            h4("Training (in-sample) accuracy"),
+            withSpinner(tableOutput("acc_train_only"))
+          )
         ),
+
 
 
         tabPanel(
@@ -132,6 +150,17 @@ ui <- fluidPage(
 
 # ---- Server ----
 server <- function(input, output, session) {
+
+  extract_spec_from_report <- function(report_text) {
+  # report_text: single string (possibly multi-line)
+  # look for ETS(...) pattern
+  ets_pat <- regexpr("ETS\\([^\\)]+\\)", report_text)
+  arima_pat <- regexpr("ARIMA\\([^\\)]+\\)", report_text)
+  ets <- if (ets_pat[1] != -1) regmatches(report_text, ets_pat) else NA_character_
+  arima <- if (arima_pat[1] != -1) regmatches(report_text, arima_pat) else NA_character_
+  list(ETS = ets, ARIMA = arima)
+}
+
 
   # Filtered data for plotting (by varietal + date range)
   filtered <- reactive({
@@ -265,125 +294,112 @@ server <- function(input, output, session) {
       })
 
       # ---- Safe fc_val (validation forecasts) ----
-    fc_val <- reactive({
+   fc_val <- reactive({
       val <- validation_tbl()
       if (is.null(val) || nrow(val) == 0) return(NULL)
       h_val <- n_distinct(val$Date)
       req(fits())
-
-      tryCatch({
-        fits() %>% forecast(h = h_val)
-      }, error = function(e) {
-        message("fc_val error: ", e$message)
-        NULL
-      })
+      tryCatch(fits() %>% forecast(h = h_val), error = function(e) { message("fc_val error:", e$message); NULL })
     })
-      
+
+
+
+    output$model_spec_table <- renderTable({
+    if (is.null(fits())) {
+      return(tibble(Note = "No fitted models yet. Click 'Fit models'."))
+    }
+
+    # convert mable to tibble
+    fm_tbl <- tryCatch(as_tibble(fits()), error = function(e) {
+      message("as_tibble(fits()) error: ", e$message); return(NULL)
+    })
+    if (is.null(fm_tbl)) return(tibble(Error = "Cannot read fitted models."))
+
+    # candidate list-columns holding models
+    candidate_cols <- names(fm_tbl)[sapply(fm_tbl, function(col) {
+      is.list(col) && length(col) > 0 && ! (is.atomic(col[[1]]) && length(col[[1]]) == 1)
+    })]
+
+    if (length(candidate_cols) == 0) {
+      return(tibble(Error = "No model-type columns found in fitted results."))
+    }
+
+    rows <- list()
+    for (colname in candidate_cols) {
+      colvals <- fm_tbl[[colname]]
+      for (i in seq_along(colvals)) {
+        mo <- colvals[[i]]
+        if (is.null(mo)) next
+        # label/key if available
+        label <- names(colvals)[i]
+        if (is.null(label) || label == "") label <- paste0("Model#", i)
+        # capture report text safely
+        rep_txt <- tryCatch(paste(capture.output(report(mo)), collapse = "\n"), error = function(e) NA_character_)
+        specs <- if (!is.na(rep_txt)) extract_spec_from_report(rep_txt) else list(ETS = NA_character_, ARIMA = NA_character_)
+        rows[[length(rows) + 1]] <- tibble(
+          ModelColumn = colname,
+          Key = label,
+          ETS_Form = specs$ETS,
+          ARIMA_Orders = specs$ARIMA
+        )
+      }
+    }
+
+    if (length(rows) == 0) {
+      return(tibble(Note = "No fitted objects available for specs."))
+    }
+
+    bind_rows(rows) %>%
+      # replace NA with empty string for clean display
+      mutate(across(everything(), ~ ifelse(is.na(.x), "", .x)))
+  })
+
   output$model_params_ui <- renderUI({
-  if (is.null(fits())) {
-    return(tags$div(tags$em("No fitted models yet. Click 'Fit models' to fit models.")))
-  }
+    if (is.null(fits())) {
+      return(tags$div(tags$em("No fitted models yet. Click 'Fit models' to fit models.")))
+    }
 
-  fm <- fits()
-  fm_tbl <- tryCatch(as_tibble(fm), error = function(e) {
-    message("as_tibble(fits()) error: ", e$message); return(NULL)
-  })
-  if (is.null(fm_tbl)) return(tags$div(tags$strong("Could not read fitted models.")))
-
-  # Detect candidate model-type list-columns in the mable
-  candidate_cols <- names(fm_tbl)[sapply(fm_tbl, function(col) {
-    is.list(col) && length(col) > 0 && ! (is.atomic(col[[1]]) && length(col[[1]]) == 1)
-  })]
-
-  # Respect the user selection (show_models). If input missing, default to all candidate_cols
-  selected_models <- tryCatch({
-    if (is.null(input$show_models)) candidate_cols else intersect(candidate_cols, input$show_models)
-  }, error = function(e) candidate_cols)
-
-  if (length(selected_models) == 0) {
-    return(tags$div(tags$strong("No model types selected OR no matching fitted model columns found.")))
-  }
-
-  # Helper to render a tibble as HTML table
-  htmlEscape <- function(x) {
-    x <- as.character(x)
-    x <- gsub("&", "&amp;", x)
-    x <- gsub("<", "&lt;", x)
-    x <- gsub(">", "&gt;", x)
-    x
-  }
-  render_table_html <- function(df) {
-    tryCatch({
-      html <- knitr::kable(df, format = "html", table.attr = "class='table table-condensed'")
-      HTML(html)
-    }, error = function(e) {
-      HTML(paste0("<pre>Could not render table: ", htmlEscape(e$message), "</pre>"))
+    fm_tbl <- tryCatch(as_tibble(fits()), error = function(e) {
+      message("as_tibble(fits()) error: ", e$message); return(NULL)
     })
-  }
+    if (is.null(fm_tbl)) return(tags$div(tags$strong("Could not read fitted models.")))
 
-  blocks <- purrr::map(selected_models, function(colname) {
-    colvals <- fm_tbl[[colname]]
+    candidate_cols <- names(fm_tbl)[sapply(fm_tbl, function(col) {
+      is.list(col) && length(col) > 0 && ! (is.atomic(col[[1]]) && length(col[[1]]) == 1)
+    })]
 
-    header_block <- tags$div(tags$h3(colname), style = "margin-top:20px;")
+    if (length(candidate_cols) == 0) {
+      return(tags$div(tags$strong("No model-type list-columns found in fitted results.")))
+    }
 
-    # for each fitted object in this model column (usually one per key/varietal)
-    obj_blocks <- purrr::imap(colvals, function(mo, idx) {
-      if (is.null(mo)) return(NULL)
+    blocks <- purrr::map(candidate_cols, function(colname) {
+      colvals <- fm_tbl[[colname]]
+      header_block <- tags$div(tags$h3(colname), style = "margin-top:20px;")
+      obj_blocks <- purrr::imap(colvals, function(mo, idx) {
+        if (is.null(mo)) return(NULL)
+        label <- tryCatch({ nm <- names(colvals)[idx]; if (is.null(nm) || nm=="") nm <- paste0("Model#", idx); nm }, error = function(e) paste0("Model#", idx))
 
-      # Determine a label for this fitted object: use names if available else index
-      label <- tryCatch({
-        nm <- names(colvals)[idx]
-        if (is.null(nm) || nchar(nm) == 0) nm <- paste0("Model #", idx)
-        nm
-      }, error = function(e) paste0("Model #", idx))
+        # Try broom::tidy()
+        tidy_df <- tryCatch({ if (requireNamespace("broom", quietly = TRUE)) broom::tidy(mo) else NULL }, error = function(e) NULL)
+        if (!is.null(tidy_df) && (is.data.frame(tidy_df) || tibble::is_tibble(tidy_df))) {
+          return(tags$div(tags$h4(label), tags$b("tidy() parameters:"), HTML(knitr::kable(tidy_df, format="html"))))
+        }
 
-      # Try broom::tidy()
-      tidy_df <- tryCatch({
-        if (requireNamespace("broom", quietly = TRUE)) broom::tidy(mo) else NULL
-      }, error = function(e) NULL)
+        # Try broom::glance()
+        glance_df <- tryCatch({ if (requireNamespace("broom", quietly = TRUE)) broom::glance(mo) %>% as.data.frame() else NULL }, error = function(e) NULL)
+        if (!is.null(glance_df) && (is.data.frame(glance_df) || tibble::is_tibble(glance_df))) {
+          return(tags$div(tags$h4(label), tags$b("glance() summary:"), HTML(knitr::kable(glance_df, format="html"))))
+        }
 
-      if (!is.null(tidy_df) && (is.data.frame(tidy_df) || tibble::is_tibble(tidy_df))) {
-        tb_html <- render_table_html(tidy_df)
-        return(tags$div(
-          tags$h4(label),
-          tags$b("tidy() parameters:"),
-          tb_html
-        ))
-      }
-
-      # Try broom::glance()
-      glance_df <- tryCatch({
-        if (requireNamespace("broom", quietly = TRUE)) broom::glance(mo) %>% as.data.frame() else NULL
-      }, error = function(e) NULL)
-
-      if (!is.null(glance_df) && (is.data.frame(glance_df) || tibble::is_tibble(glance_df))) {
-        tb_html <- render_table_html(glance_df)
-        return(tags$div(
-          tags$h4(label),
-          tags$b("glance() summary:"),
-          tb_html
-        ))
-      }
-
-      # Fallback: full report() text
-      report_text <- tryCatch({
-        paste(capture.output(report(mo)), collapse = "\n")
-      }, error = function(e) {
-        paste0("report() error: ", e$message)
+        # Fallback: full report()
+        report_text <- tryCatch({ paste(capture.output(report(mo)), collapse = "\n") }, error = function(e) paste0("report() error: ", e$message))
+        tags$div(tags$h4(label), tags$b("report():"), tags$pre(report_text))
       })
-
-      tags$div(
-        tags$h4(label),
-        tags$b("report():"),
-        tags$pre(report_text)
-      )
+      tags$div(header_block, obj_blocks)
     })
 
-    tags$div(header_block, obj_blocks)
+    do.call(tagList, blocks)
   })
-
-  do.call(tagList, blocks)
-})
 
 
 
@@ -449,6 +465,38 @@ server <- function(input, output, session) {
   }
 
   combined
+})
+
+output$acc_val_only <- renderTable({
+  fval <- fc_val()
+  val <- validation_tbl()
+  if (is.null(fval) || is.null(val) || nrow(val) == 0) {
+    return(tibble(Note = "Validation window empty or forecasts unavailable."))
+  }
+  tryCatch({
+    fabletools::accuracy(fval, val) %>%
+      select(.model, ME, RMSE, MAE, MAPE) %>%
+      mutate(Window = "Validation") %>%
+      arrange(RMSE)
+  }, error = function(e) {
+    message("acc_val_only error: ", e$message)
+    tibble(Error = paste("Validation accuracy error:", e$message))
+  })
+})
+
+# Training accuracy table output (separate)
+output$acc_train_only <- renderTable({
+  if (is.null(fits())) return(tibble(Note = "No fitted models yet."))
+
+  tryCatch({
+    fabletools::accuracy(fits()) %>%
+      select(.model, ME, RMSE, MAE, MAPE) %>%
+      mutate(Window = "Train") %>%
+      arrange(RMSE)
+  }, error = function(e) {
+    message("acc_train_only error: ", e$message)
+    tibble(Error = paste("Train accuracy error:", e$message))
+  })
 })
 
 
