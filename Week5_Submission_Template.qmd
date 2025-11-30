@@ -1,0 +1,52 @@
+---
+title: "ADS 506 — Week 5 Submission: Storytelling with Shiny"
+author: "Your Name"
+date: today
+format:
+  pdf:
+    toc: false
+    geometry: ["margin=1in"]
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+<!-- Keep this entire document to **≤ 2 pages** including screenshots. Remove any guidance text before submitting. -->
+
+## Part I — Links and Description (required)
+
+-   **Deployed Shiny App URL:** <https://...>
+-   **Code URL:** (choose one)
+    -   GitHub repository: <https://github.com/...>
+    -   or posit.cloud project (ensure instructor access): <https://posit.cloud/...>
+
+<!-- Briefly describe your app , It's main features and how to use it. -->
+
+App Description: *Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.*
+
+App Features:
+
+-   *Lorem ipsum dolor sit amet \<required features\>*
+-   *Lorem ipsum dolor sit amet \<additional features\>*
+-   ...
+
+## Part II — Data Story (≤ 2 pages total)
+
+```{=html}
+<!-- Insight (2–3 sentences, concise)
+State your key finding and why it matters. Example: “Sparkling shows consistent December spikes; ETS(M,A,M) outperforms ARIMA on validation RMSE, so it’s the more reliable seasonal model for forward planning.” -->
+```
+
+```{=html}
+<!-- Evidence (screenshots + narrative + minimal tables) 
+Insert screenshots from your app that support your insight. Use short, descriptive captions and list the app inputs so we can reproduce each figure. -->
+```
+
+------------------------------------------------------------------------
+
+```{=html}
+<!-- Optional references section (remove if not used). To use APA, add a CSL file and bibliography in your project and uncomment below.
+# References
+-->
+```
