@@ -3,3 +3,7 @@ test_files/
 *.html
 *.docx
 *.csv
+!AustralianWines.csv
+
+renv/
+!renv/settings.dcf

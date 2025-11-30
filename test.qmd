@@ -1,9 +1,0 @@
----
-title: "test"
-format: html
----
-
-## R chunk test
-
-```{r}
-summary(rnorm(20))

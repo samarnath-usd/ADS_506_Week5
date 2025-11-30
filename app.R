@@ -46,7 +46,7 @@ ui <- fluidPage(
         "Varietal(s):",
         choices  = unique(wines$Varietal),
         selected = unique(wines$Varietal)[1],
-        multiple = FALSE
+        multiple = TRUE
       ),
 
       dateRangeInput(
