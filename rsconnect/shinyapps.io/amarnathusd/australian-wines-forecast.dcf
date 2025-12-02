@@ -1,0 +1,10 @@
+name: australian-wines-forecast
+title:
+username: amarnathusd
+account: amarnathusd
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16198693
+bundleId: 11253104
+url: https://amarnathusd.shinyapps.io/australian-wines-forecast/
+version: 1

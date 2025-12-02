@@ -141,6 +141,12 @@ ui <- fluidPage(
           br(),
           h4("Forecast comparison (with intervals)"),
           withSpinner(plotOutput("forecast_plot", height = "600px"))
+        ),
+        tabPanel(
+          "About",
+          br(),
+          h4("Forecast comparison (with intervals)"),
+          withSpinner(plotOutput("feature_list", height = "600px"))
         )
       )
     )
@@ -237,39 +243,106 @@ server <- function(input, output, session) {
   # Fit models per varietal
   # ---------- REPLACE your existing fits reactive with this ----------
 
+  arima_error_msg <- reactiveVal(NULL)
+
   fits <- eventReactive(input$fit_models, {
-    # Defensive checks
-    if (is.null(train_tbl()) || nrow(train_tbl()) == 0) {
-      showNotification("No training data. Adjust 'train_end' slider or varietal selection before fitting.", type = "error", duration = 6)
-      # print debug info to console for troubleshooting
-      message("DEBUG: train_tbl() is empty. train_tbl() rows = ", ifelse(is.null(train_tbl()), NA, nrow(train_tbl())))
-      if (!is.null(selection_full())) {
-        message("DEBUG: selection_full() rows = ", nrow(selection_full()))
-        message("DEBUG: available dates (min,max) = ", min(selection_full()$Date), ", ", max(selection_full()$Date))
-        message("DEBUG: selected varietals = ", paste(unique(selection_full()$Varietal), collapse = ", "))
-      }
-      return(NULL)
+  req(nrow(train_tbl()) > 0)
+  train <- train_tbl()
+
+  # drop accidental duplicate Varietal.* columns if present (from prior joins etc.)
+  train <- train %>% select(-matches("^Varietal\\.\\.\\.\\d+$"), everything())
+
+  # Try to fit all three in one model() call. If ARIMA errors, try again without ARIMA.
+  out <- tryCatch({
+    train %>%
+      model(
+        TSLM  = TSLM(Value ~ trend() + season()),
+        ETS   = ETS(Value),
+        ARIMA = ARIMA(Value)
+      )
+  }, error = function(e1) {
+    # If ARIMA failed, attempt fitting TSLM + ETS only and inform the user
+    message("Primary model() failed (likely ARIMA). Retrying without ARIMA: ", e1$message)
+    showNotification("ARIMA fit failed; fitting TSLM and ETS only.", type = "warning", duration = 6)
+    tryCatch({
+      train %>%
+        model(
+          TSLM = TSLM(Value ~ trend() + season()),
+          ETS  = ETS(Value)
+        )
+    }, error = function(e2) {
+      # If even this fails, return NULL and inform
+      message("Fallback model() also failed: ", e2$message)
+      showNotification(paste("Model fit error:", e2$message), type = "error")
+      NULL
+    })
+  })
+
+  out
+})
+
+
+  # Helper: fallback ARIMA forecasts using forecast::auto.arima (returns a tsibble-like forecast tibble)
+  arima_fallback_forecast <- function(train_tsibble, h, conf_levels = c(80,95)) {
+    # train_tsibble: tsibble with index Date and key Varietal, and column Value
+    # returns a tibble with columns: Varietal, Date (forecast index), Point_Forecast, Lo80, Hi80, Lo95, Hi95, .model
+    requireNamespace("forecast", quietly = TRUE) || stop("Install forecast package")
+    out_rows <- list()
+
+    keys <- unique(train_tsibble$Varietal)
+    for (k in keys) {
+      sub <- train_tsibble %>% filter(Varietal == k) %>% as_tibble()
+      # convert to ts (monthly)
+      start_year <- year(min(sub$Date))
+      start_month <- month(min(sub$Date))
+      tsdata <- ts(sub$Value, start = c(start_year, start_month), frequency = 12)
+      fit <- forecast::auto.arima(tsdata)
+      fc <- forecast::forecast(fit, h = h, level = c(80,95))
+      fc_times <- seq(as.Date(max(sub$Date)) %m+% months(1), by = "1 month", length.out = h)
+      df <- tibble(
+        Varietal = k,
+        Date = fc_times,
+        Point_Forecast = as.numeric(fc$mean),
+        Lo80 = as.numeric(fc$lower[1,]),
+        Hi80 = as.numeric(fc$upper[1,]),
+        Lo95 = as.numeric(fc$lower[2,]),
+        Hi95 = as.numeric(fc$upper[2,]),
+        .model = "ARIMA_fallback"
+      )
+      out_rows[[length(out_rows)+1]] <- df
+    }
+    bind_rows(out_rows)
+  }
+
+  fc_h <- reactive({
+    req(fits())
+    h <- as.integer(pmax(1, input$h))
+
+    # Try fable forecast; if it errors (unexpected), return NULL and log
+    f_h <- tryCatch({
+      fits() %>% forecast(h = h)
+    }, error = function(e) {
+      message("fc_h forecast error: ", e$message)
+      NULL
+    })
+
+    # If f_h is NULL, try fallback ARIMA per-series using forecast::auto.arima
+    if (is.null(f_h)) {
+      message("Using ARIMA fallback forecasts (forecast::auto.arima) for each series.")
+      train_for_fallback <- selection_full() %>% group_by(Varietal) %>% index_by(Date = Date) %>% as_tsibble()
+      fallback_df <- tryCatch({
+        arima_fallback_forecast(train_for_fallback, h = h)
+      }, error = function(e) {
+        message("arima_fallback_forecast error: ", e$message)
+        NULL
+      })
+      # mark fallback result
+      attr(fallback_df, "fallback") <- TRUE
+      return(fallback_df)
     }
 
-    # If we reach here we have training data; fit models with progress notification
-    withProgress(message = "Fitting models...", value = 0, {
-      incProgress(0.1)
-      res <- tryCatch({
-        train_tbl() %>%
-          model(
-            TSLM  = TSLM(Value ~ trend() + season()),
-            ETS   = ETS(Value),
-            ARIMA = ARIMA(Value)
-          )
-      }, error = function(e) {
-        showNotification(paste0("Model fitting failed: ", e$message), type = "error", duration = 8)
-        message("Model fit error: ", e$message)
-        return(NULL)
-      })
-      incProgress(0.9)
-      res
-    })
-  }, ignoreNULL = FALSE)   # keep ignoreNULL FALSE if you want initial evaluation; change to TRUE if you want only on click
+    f_h
+  })
 
   # ---------- Add an observer to print debug info to console when Fit models is clicked ----------
   observeEvent(input$fit_models, {
@@ -285,22 +358,26 @@ server <- function(input, output, session) {
     message("----------------------------")
   })
 
+  fc_val <- reactive({
+    val <- validation_tbl()
+    if (is.null(val) || nrow(val) == 0) return(NULL)
+    h_val <- n_distinct(val$Date)
+    req(fits())
 
-  # Forecasts for user-defined horizon
-  fc_h <- reactive({
-        req(fits())
-        fits() |>
-          forecast(h = input$h)
+    tryCatch({
+      fits() %>% forecast(h = h_val)
+    }, error = function(e) {
+      message("fc_val error:", e$message)
+      # try fallback per-series
+      train_for_fallback <- selection_full() %>% group_by(Varietal) %>% index_by(Date = Date) %>% as_tsibble()
+      tryCatch({
+        arima_fallback_forecast(train_for_fallback, h = h_val)
+      }, error = function(e2) {
+        message("fc_val fallback also failed: ", e2$message)
+        NULL
       })
-
-      # ---- Safe fc_val (validation forecasts) ----
-   fc_val <- reactive({
-      val <- validation_tbl()
-      if (is.null(val) || nrow(val) == 0) return(NULL)
-      h_val <- n_distinct(val$Date)
-      req(fits())
-      tryCatch(fits() %>% forecast(h = h_val), error = function(e) { message("fc_val error:", e$message); NULL })
     })
+  })
 
 
 
@@ -402,14 +479,14 @@ server <- function(input, output, session) {
   })
 
 
-
-  # ---- Accuracy: train & validation ----
   acc_train_table <- reactive({
     if (is.null(fits())) return(NULL)
+    train <- train_tbl()
+    req(nrow(train) > 0)
 
     tryCatch({
-      # training / in-sample accuracy for mable
-      fabletools::accuracy(fits()) %>%
+      # accuracy for models vs training data
+      fabletools::accuracy(fits(), train) %>%
         select(.model, ME, RMSE, MAE, MAPE) %>%
         mutate(Window = "Train")
     }, error = function(e) {
@@ -421,11 +498,28 @@ server <- function(input, output, session) {
   acc_val_table <- reactive({
     val <- validation_tbl()
     fval <- fc_val()
-
     if (is.null(val) || nrow(val) == 0 || is.null(fval)) return(NULL)
 
+    # If fallback tibble returned, compute accuracy manually by merging forecasts & actuals
+    if (!is.null(attr(fval, "fallback")) && isTRUE(attr(fval, "fallback"))) {
+      # fval is a tibble with Varietal, Date, Point_Forecast, Lo80, Hi80, ...
+      joined <- fval %>% left_join(as_tibble(val) %>% select(Varietal, Date, Value), by = c("Varietal", "Date"))
+      # compute error metrics per model (fallback .model column)
+      library(Metrics) # lightweight; optional — or compute manually
+      acc <- joined %>%
+        group_by(.model) %>%
+        summarise(
+          ME = mean(Point_Forecast - Value, na.rm = TRUE),
+          RMSE = sqrt(mean((Point_Forecast - Value)^2, na.rm = TRUE)),
+          MAE = mean(abs(Point_Forecast - Value), na.rm = TRUE),
+          MAPE = mean(abs((Point_Forecast - Value)/Value) * 100, na.rm = TRUE)
+        ) %>%
+        mutate(Window = "Validation")
+      return(acc)
+    }
+
+    # Normal fabletools path
     tryCatch({
-      # correct pattern: accuracy(forecast_fable, actuals_tsibble)
       fabletools::accuracy(fval, val) %>%
         select(.model, ME, RMSE, MAE, MAPE) %>%
         mutate(Window = "Validation")
@@ -467,56 +561,68 @@ server <- function(input, output, session) {
   combined
 })
 
-output$acc_val_only <- renderTable({
-  fval <- fc_val()
-  val <- validation_tbl()
-  if (is.null(fval) || is.null(val) || nrow(val) == 0) {
-    return(tibble(Note = "Validation window empty or forecasts unavailable."))
-  }
-  tryCatch({
-    fabletools::accuracy(fval, val) %>%
-      select(.model, ME, RMSE, MAE, MAPE) %>%
-      mutate(Window = "Validation") %>%
-      arrange(RMSE)
-  }, error = function(e) {
-    message("acc_val_only error: ", e$message)
-    tibble(Error = paste("Validation accuracy error:", e$message))
+  output$acc_val_only <- renderTable({
+    fval <- fc_val()
+    val <- validation_tbl()
+    if (is.null(fval) || is.null(val) || nrow(val) == 0) {
+      return(tibble(Note = "Validation window empty or forecasts unavailable."))
+    }
+    tryCatch({
+      fabletools::accuracy(fval, val) %>%
+        select(.model, ME, RMSE, MAE, MAPE) %>%
+        mutate(Window = "Validation") %>%
+        arrange(RMSE)
+    }, error = function(e) {
+      message("acc_val_only error: ", e$message)
+      tibble(Error = paste("Validation accuracy error:", e$message))
+    })
   })
-})
 
-# Training accuracy table output (separate)
-output$acc_train_only <- renderTable({
-  if (is.null(fits())) return(tibble(Note = "No fitted models yet."))
+  # Training accuracy table output (separate)
+  output$acc_train_only <- renderTable({
+    if (is.null(fits())) return(tibble(Note = "No fitted models yet."))
 
-  tryCatch({
-    fabletools::accuracy(fits()) %>%
-      select(.model, ME, RMSE, MAE, MAPE) %>%
-      mutate(Window = "Train") %>%
-      arrange(RMSE)
-  }, error = function(e) {
-    message("acc_train_only error: ", e$message)
-    tibble(Error = paste("Train accuracy error:", e$message))
+    tryCatch({
+      fabletools::accuracy(fits()) %>%
+        select(.model, ME, RMSE, MAE, MAPE) %>%
+        mutate(Window = "Train") %>%
+        arrange(RMSE)
+    }, error = function(e) {
+      message("acc_train_only error: ", e$message)
+      tibble(Error = paste("Train accuracy error:", e$message))
+    })
   })
-})
 
-
-
-
-  # Forecast plot: history + forecasts + intervals
   output$forecast_plot <- renderPlot({
     req(fc_h())
     base_data <- selection_full()
 
+    f_h <- fc_h()
+
+    # fallback tibble case
+    if (!is.null(attr(f_h, "fallback")) && isTRUE(attr(f_h, "fallback"))) {
+      # simple ggplot: historical + point forecasts + ribbons
+      gp <- ggplot() +
+        geom_line(data = as_tibble(base_data), aes(x = as.Date(Date), y = Value, color = Varietal)) +
+        geom_point(data = f_h, aes(x = as.Date(Date), y = Point_Forecast, color = Varietal)) +
+        geom_ribbon(data = f_h, aes(x = as.Date(Date), ymin = Lo95, ymax = Hi95, fill = Varietal), alpha = 0.15) +
+        facet_wrap(vars(Varietal), scales = "free_y") +
+        labs(title = "Forecasts (fallback ARIMA)", x = "Month", y = "Sales") +
+        theme_minimal()
+      print(gp)
+      return()
+    }
+
+    # Normal fable forecast object case — use autoplot/autolayer
     autoplot(base_data, Value) +
-      autolayer(fc_h(), aes(color = .model), interval = TRUE) +
+      autolayer(f_h, aes(color = .model), interval = TRUE) +
       facet_wrap(vars(Varietal), scales = "free_y") +
-      labs(
-        title = "Forecasts (with 80/95% intervals)",
-        x = "Month",
-        y = "Sales"
-      ) +
+      labs(title = "Forecasts (with intervals)", x = "Month", y = "Sales") +
       theme_minimal()
   })
+
+
+
 
   # Features list
   output$feature_list <- renderUI({

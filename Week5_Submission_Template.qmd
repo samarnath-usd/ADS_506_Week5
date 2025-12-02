@@ -1,6 +1,6 @@
 ---
 title: "ADS 506 — Week 5 Submission: Storytelling with Shiny"
-author: "Your Name"
+author: "Sanka Amarnath"
 date: today
 format:
   pdf:
@@ -18,8 +18,7 @@ execute:
 
 -   **Deployed Shiny App URL:** <https://...>
 -   **Code URL:** (choose one)
-    -   GitHub repository: <https://github.com/...>
-    -   or posit.cloud project (ensure instructor access): <https://posit.cloud/...>
+    -   GitHub repository: https://github.com/samarnath-usd/ADS_506_Week5
 
 <!-- Briefly describe your app , It's main features and how to use it. -->
 
